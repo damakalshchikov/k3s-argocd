@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: ghcr.io/damakalshchikov/simple-flask-service:latest
+          image: ghcr.io/damakalshchikov/simple-flask-service:sha-93ba276
           imagePullPolicy: Always
           ports:
             - containerPort: 5000
