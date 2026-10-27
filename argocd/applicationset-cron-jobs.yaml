@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cron-jobs
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/damakalshchikov/k3s-argocd.git
+        revision: main
+        directories:
+          - path: cron-jobs/*
+  template:
+    metadata:
+      name: 'cron-{{.path.basename}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/damakalshchikov/k3s-argocd.git
+        targetRevision: main
+        path: '{{.path.path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: cron-jobs
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+      ignoreDifferences:
+        - group: batch
+          kind: CronJob
+          jsonPointers:
+            - /spec/suspend

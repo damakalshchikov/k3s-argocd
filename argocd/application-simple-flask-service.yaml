@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: simple-flask-service
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/damakalshchikov/k3s-argocd.git
+    targetRevision: main
+    path: apps/simple-flask-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: flask
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

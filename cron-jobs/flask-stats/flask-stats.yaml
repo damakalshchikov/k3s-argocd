@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: flask-stats
+  namespace: cron-jobs
+spec:
+  schedule: "0 * * * *"
+  timeZone: "Europe/Moscow"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: stats
+              image: curlimages/curl:8.11.1
+              env:
+                - name: API
+                  value: http://simple-flask-service.flask.svc
+                - name: DELAY_SECONDS
+                  value: "0"
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  count() { curl -sS --fail --max-time 10 "$1" | grep -o '"id"' | wc -l; }
+                  echo "$(date -Iseconds) статистика $API"
+                  echo "Проектов: $(count "$API/projects/")"
+                  for s in todo in_progress done; do
+                    echo "Задач $s: $(count "$API/tasks/?status=$s")"
+                  done
+                  if [ "$DELAY_SECONDS" -gt 0 ]; then
+                    echo "Задержка $DELAY_SECONDS с"
+                    sleep "$DELAY_SECONDS"
+                  fi
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { cpu: 100m, memory: 64Mi }

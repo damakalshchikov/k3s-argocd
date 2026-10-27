@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-flask-service
+  namespace: flask
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-flask-service
+  template:
+    metadata:
+      labels:
+        app: simple-flask-service
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/damakalshchikov/simple-flask-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql+psycopg2://postgres:$(POSTGRES_PASSWORD)@postgres:5432/simple-database
+          readinessProbe:
+            httpGet:
+              path: /health/db
+              port: 5000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-flask-service
+  namespace: flask
+spec:
+  selector:
+    app: simple-flask-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5000
