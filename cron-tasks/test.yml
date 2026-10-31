@@ -37,11 +37,9 @@ metadata:
 spec:
   restartPolicy: Never
   serviceAccountName: backup-cluster-state
-  imagePullSecrets:
-    - name: gitlab-registry-secret
   initContainers:
     - name: dump
-      image: gitlab.tvoe-dev.ru:5050/sysadmin/images/kubectl:latest
+      image: bitnami/kubectl:latest
       command:
         - /bin/sh
         - -ec
@@ -171,7 +169,7 @@ spec:
           mountPath: /work
   containers:
     - name: upload
-      image: gitlab.tvoe-dev.ru:5050/sysadmin/images/rclone:1.67
+      image: rclone/rclone:1.67
       command:
         - /bin/sh
         - -ec
