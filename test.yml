@@ -1,0 +1,193 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-cluster-state
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backup-cluster-state
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backup-cluster-state
+subjects:
+  - kind: ServiceAccount
+    name: backup-cluster-state
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backup-cluster-state
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: backup-test-pod
+  namespace: default
+spec:
+  restartPolicy: Never
+  serviceAccountName: backup-cluster-state
+  imagePullSecrets:
+    - name: gitlab-registry-secret
+  initContainers:
+    - name: dump
+      image: gitlab.tvoe-dev.ru:5050/sysadmin/images/kubectl:latest
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          # ... (ЗДЕСЬ ОСТАВЛЯЕТЕ ВЕСЬ СВОЙ СКРИПТ ИЗ INIT-КОНТЕЙНЕРА DUMP БЕЗ ИЗМЕНЕНИЙ) ...
+          set -eu
+          echo "start $(date)"
+          command -v kubectl
+          kubectl auth can-i list secrets --all-namespaces
+          kubectl auth can-i get secrets -n argocd
+          export TZ=Europe/Moscow
+          DATE=$(date +%Y-%m-%d_%H-%M)
+          OUT=/work/dump
+          rm -rf "$OUT"
+          mkdir -p "$OUT/argocd/secrets" "$OUT/argocd/configmaps" "$OUT/tls" "$OUT/registry" "$OUT/rabbitmq"
+          : > "$OUT/manifest.txt"
+          nfiles=0
+
+          strip() {
+            src="$1"
+            dest="$2"
+            : > "$dest"
+            while IFS= read -r line; do
+              case "$line" in
+                "  resourceVersion:"*|"  uid:"*|"  creationTimestamp:"*|"  generation:"*) continue ;;
+              esac
+              printf '%s\n' "$line" >> "$dest"
+            done < "$src"
+            rm -f "$src"
+          }
+
+          dump() {
+            ns="$1"
+            kind="$2"
+            name="$3"
+            dest="$4"
+            kubectl -n "$ns" get "$kind" "$name" -o yaml > "$dest.raw"
+            strip "$dest.raw" "$dest"
+            echo "$dest" >> "$OUT/manifest.txt"
+            nfiles=$((nfiles + 1))
+            echo "ok $kind $ns/$name"
+          }
+
+          echo "=== argocd secrets ==="
+          kubectl -n argocd get secrets -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.type}{"\n"}{end}' > /tmp/argocd-secrets.list
+          found_argocd_secret=0
+          while read -r name type; do
+            [ -n "$name" ] || continue
+            case "$type" in
+              kubernetes.io/service-account-token|helm.sh/release.v1) continue ;;
+            esac
+            case "$name" in
+              sh.helm.release.*) continue ;;
+            esac
+            dump argocd secret "$name" "$OUT/argocd/secrets/${name}.yaml"
+            if [ "$name" = "argocd-secret" ]; then
+              found_argocd_secret=1
+            fi
+          done < /tmp/argocd-secrets.list
+          if [ "$found_argocd_secret" -ne 1 ]; then
+            echo "ОШИБКА: в namespace argocd нет секрета argocd-secret"
+            exit 1
+          fi
+
+          echo "=== argocd configmaps ==="
+          for cm in argocd-cm argocd-rbac-cm argocd-cmd-params-cm argocd-tls-certs-cm argocd-ssh-known-hosts-cm argocd-notifications-cm argocd-gpg-keys-cm; do
+            if kubectl -n argocd get configmap "$cm" >/dev/null 2>&1; then
+              dump argocd configmap "$cm" "$OUT/argocd/configmaps/${cm}.yaml"
+            else
+              echo "нет configmap argocd/$cm, пропуск"
+            fi
+          done
+          if [ ! -f "$OUT/argocd/configmaps/argocd-cm.yaml" ]; then
+            echo "ОШИБКА: нет configmap argocd/argocd-cm"
+            exit 1
+          fi
+
+          echo "=== ingress TLS ==="
+          kubectl get ingress -A -o go-template='{{range .items}}{{$ns := .metadata.namespace}}{{range .spec.tls}}{{if .secretName}}{{$ns}} {{.secretName}}{{"\n"}}{{end}}{{end}}{{end}}' > /tmp/tls.raw
+          seen=""
+          while read -r ns name; do
+            [ -n "${ns:-}" ] || continue
+            [ -n "${name:-}" ] || continue
+            case " $seen " in
+              *" $ns/$name "*) continue ;;
+            esac
+            seen="$seen $ns/$name"
+            if kubectl -n "$ns" get secret "$name" >/dev/null 2>&1; then
+              mkdir -p "$OUT/tls/$ns"
+              dump "$ns" secret "$name" "$OUT/tls/$ns/$name.yaml"
+            else
+              echo "нет secret $ns/$name, пропуск"
+              echo "$ns/$name" >> "$OUT/tls-missing.txt"
+            fi
+          done < /tmp/tls.raw
+
+          echo "=== gitlab-registry-secret ==="
+          kubectl get secret -A --field-selector metadata.name=gitlab-registry-secret -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' > /tmp/registry.list
+          registry_count=0
+          while read -r ns; do
+            [ -n "$ns" ] || continue
+            dump "$ns" secret gitlab-registry-secret "$OUT/registry/${ns}.yaml"
+            registry_count=$((registry_count + 1))
+          done < /tmp/registry.list
+          if [ "$registry_count" -eq 0 ]; then
+            echo "ОШИБКА: gitlab-registry-secret не найден ни в одном namespace"
+            exit 1
+          fi
+
+          echo "=== rabbitmq default user ==="
+          kubectl get secret -A --field-selector metadata.name=rabbitmq-cluster-default-user -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' > /tmp/rabbit.list
+          rabbit_count=0
+          while read -r ns; do
+            [ -n "$ns" ] || continue
+            dump "$ns" secret rabbitmq-cluster-default-user "$OUT/rabbitmq/${ns}.yaml"
+            rabbit_count=$((rabbit_count + 1))
+          done < /tmp/rabbit.list
+          if [ "$rabbit_count" -eq 0 ]; then
+            echo "ОШИБКА: секрет rabbitmq-cluster-default-user не найден"
+            exit 1
+          fi
+
+          echo "$DATE" > /work/date
+          echo "снимок готов, файлов: $nfiles"
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  containers:
+    - name: upload
+      image: gitlab.tvoe-dev.ru:5050/sysadmin/images/rclone:1.67
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          set -eu
+          export TZ=Europe/Moscow
+          DATE=$(cat /work/date)
+          ARCHIVE="/work/admin-cluster-state_${DATE}.tar.gz"
+          tar -czf "$ARCHIVE" -C /work dump
+          
+          # ВМЕСТО rclone ПРОСТО СПИМ, ЧТОБЫ МЫ УСПЕЛИ ЗАБРАТЬ ФАЙЛ
+          echo "Архив готов, сплю 1 час"
+          sleep 3600
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      emptyDir: {}
